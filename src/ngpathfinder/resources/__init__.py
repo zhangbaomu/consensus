@@ -1,0 +1,1 @@
+"""Packaged resource helpers for NanoGraph PathFinder."""

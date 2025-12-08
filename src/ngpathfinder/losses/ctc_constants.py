@@ -1,0 +1,14 @@
+"""Shared constants for CTC(-CRF) models."""
+
+NUM_BASES = 4
+STATE_EXTEND_OFFSET = NUM_BASES
+NUM_STATES = NUM_BASES * 2
+NUM_BLANK_CLASSES = NUM_BASES + 1
+
+
+__all__ = [
+    "NUM_BASES",
+    "NUM_STATES",
+    "STATE_EXTEND_OFFSET",
+    "NUM_BLANK_CLASSES",
+]
