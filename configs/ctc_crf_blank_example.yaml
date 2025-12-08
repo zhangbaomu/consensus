@@ -1,0 +1,84 @@
+# Minimal Dorado-style CTC-CRF (blank-first) training recipe.
+#
+# This configuration enables the `ctc_crf_blank` variant, aligns the decoder/loss
+# beam parameters, and defaults inference to the k2 Viterbi path so the model
+# behaves like the "A profile" described in the project notes.
+seed: 42
+
+data:
+  dataset: read
+  params:
+    train_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/with_ref_poa/train
+    val_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/with_ref_poa/val
+    test_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/wo_ref_poa
+  batch_size: 2
+  num_workers: 0
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: null
+  val_batch_size: null
+  test_batch_size: null
+
+encoder:
+  name: dual_branch
+  params:
+    hidden_dim: 128
+
+fusion:
+  name: identity
+  params: {}
+
+aggregator:
+  name: identity
+  params: {}
+
+decoder:
+  name: ctc_crf
+  params:
+    variant: ctc_crf_blank
+    model_dim: 128
+    num_layers: 3
+    num_heads: 8
+    dropout: 0.1
+    ffn_multiplier: 4.0
+    use_temporal_positional_encoding: true
+    return_viterbi: true
+    learn_transition_bias: true  # set to false to keep transition scores fixed at zero
+    clamp_transition: 8.0
+    denominator:
+      type: ctc_grammar
+      allow_same_base_repeat: true
+    viterbi_search_beam: 40.0
+    viterbi_output_beam: 14.0
+    viterbi_min_active_states: 48
+    viterbi_max_active_states: 8192
+
+losses:
+  ctc_crf:
+    name: ctc_crf
+    params:
+      search_beam: 40.0
+      output_beam: 14.0
+      min_active_states: 48
+      max_active_states: 8192
+      use_double_scores: false
+
+optimizer:
+  name: adam
+  params:
+    lr: 0.0003
+
+trainer:
+  max_epochs: 1
+  precision: float32
+
+inference:
+  decode_strategy: viterbi
+  params:
+    search_beam: 40.0
+    output_beam: 14.0
+    min_active_states: 48
+    max_active_states: 8192
+
+output_dir: outputs/ctc_crf_blank_example
+checkpoint_dir: checkpoints/ctc_crf_blank_example

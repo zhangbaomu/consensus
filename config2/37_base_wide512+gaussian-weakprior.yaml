@@ -1,0 +1,122 @@
+
+# 弱先验 + Gaussian 相对位置（去掉硬窗）
+seed: 3407
+
+init_checkpoint: outputs2/24_base_wide512+hard-window-init/checkpoints/epoch_0014.pt
+
+data:
+  dataset: read
+  params:
+    train_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/with_ref_poa/train
+    val_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/with_ref_poa/val
+    test_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/wo_ref_poa
+    max_mv_len: 1200
+    max_reads_per_segment: 25
+    suppress_mv_len_warnings: true
+    use_fasta_reference: true
+    use_fastq_base_sequence: false
+  batch_size: 2
+  num_workers: 12
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  val_batch_size: null
+  test_batch_size: null
+
+encoder:
+  name: dual_branch
+  params:
+    signal_dim: 6
+    hidden_dim: 512
+    signal_kernel_size: 5
+    context_kernel_size: 5
+
+fusion:
+  name: query
+  params:
+    hidden_dim: 512
+    num_heads: 8
+    num_queries: 800
+    max_learned_queries: 800
+    dynamic_query_cap: 800
+    fourier_frequencies: 16
+    use_learned_residual: true
+    hint_strength: 0.1
+    use_gating: false
+    gate_threshold: 0.0
+    relative_bias: gaussian       # 改用高斯相对位置
+    gaussian_sigma_init: [0.0001, 0.001, 0.002, 0.004, 0.006, 0.008, 0.0010, 0.032]
+    window_multiplier: 2.5        # 保留默认（对 gaussian 无效）
+    min_window_bins: 1
+    store_attention: false
+    use_kv_positional_encoding: true
+    num_query_self_layers: 2
+
+aggregator:
+  name: set_transformer
+  params:
+    hidden_dim: 512
+    num_heads: 8
+    num_layers: 2
+    ffn_multiplier: 4.0
+    dropout: 0.1
+    num_seeds: 4
+    flag_dim: 8
+    include_uncertainty: true
+    residual_scale_init: 0.4
+    bias_strength: 1.0
+    gaussian_sigma_init: [0.06, 0.12, 0.24]
+
+decoder:
+  name: ctc
+  params:
+    model_dim: 512
+    num_layers: 4
+    num_heads: 16
+    dropout: 0.1
+    ffn_multiplier: 4.0
+    use_temporal_positional_encoding: true
+
+losses:
+  ctc_fast:
+    name: ctc_fast
+    params:
+      blank: 0
+      reduction: mean
+      zero_infinity: true
+  temporal_order:
+    name: temporal_order
+    params:
+      weight: 0.5
+      margin: 0.0
+
+optimizer:
+  name: adam
+  params:
+    lr: 0.00001
+    betas: [0.9, 0.98]
+    eps: 1.0e-9
+    weight_decay: 1.0e-9
+
+scheduler:
+  name: cosineannealinglr
+  params:
+    eta_min: 1.0e-8
+
+trainer:
+  precision: bfloat16
+  gradient_clip_val: 1.0
+  log_interval: 50
+
+output_dir: outputs2/37_base_wide512+gaussian-weakprior
+checkpoint_dir: checkpoints
+
+inference:
+  decode_strategy: torchaudio
+  beam_width: 100
+  beam_prune_threshold: 50
+  torchaudio:
+    nbest: 3
+    beam_threshold: 50
+    blank_token: "-"
+    sil_token: "-"

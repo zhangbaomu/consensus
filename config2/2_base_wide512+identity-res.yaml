@@ -1,0 +1,167 @@
+# 完整的 CTC-CRF 端到端示例配置。
+#
+# 用途：串联仓库中所有主要模块（编码器→融合→聚合→CTC-CRF 解码器），
+#       并演示如何在随仓库提供的纳米孔短片段样本上跑通一轮训练脚手架。
+#       适合作为复现/二次开发的起始模板。
+#
+# 快速自检：
+#   python scripts/train.py --config configs/ctc_crf_full_stack.yaml
+#
+# 训练脚本 scripts/train.py 目前只包含最小可用的训练循环，
+# 因此若要进行正式训练，请根据自身框架（Lightning、DeepSpeed 等）
+# 将本配置文件中各模块的构造参数迁移过去。
+
+# 固定随机种子，便于复现实验结果。
+seed: 3407
+
+# init_checkpoint:
+
+# 数据模块：负责按 batch 读取纳米孔信号片段。
+data:
+  # dataset: 指定要实例化的基础数据集，目前支持 read（ReadDataset）。
+  dataset: read
+  params:
+    # train_dir/val_dir/test_dir: 分别指向训练、验证、测试数据目录。
+    # 可直接填写单个片段目录（如本示例），也可以给出包含多片段子目录的上层文件夹；
+    # ReadDataset 会自动下探寻找带有 *.index.tsv / *.reads.fastq / *.mv.npy / *.signals.npy 的子目录。
+    # 示例配置仍使用仓库内附带的小样本，实际训练时请替换为自己的大规模数据路径。
+    train_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/with_ref_poa/train
+    val_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/with_ref_poa/val
+    test_dir: signal_data/sup_5.2.0_top5k+2k_hp_windows200_float32_corrected_1/wo_ref_poa
+    max_mv_len: 1200
+    max_reads_per_segment: 25
+    suppress_mv_len_warnings: true
+  # batch_size: 每个迭代从磁盘取出的窗口数量；示例数据较小可设为 2。
+  batch_size: 2
+  # num_workers: DataLoader 读取进程数量；示例环境中设 0 可避免多进程开销。
+  num_workers: 12
+  # pin_memory: 为 GPU 训练时将 CPU 批次固定在页锁内存，提升拷贝效率。
+  pin_memory: true
+  # persistent_workers: 当 num_workers>0 时保留 worker，避免每个 epoch 重启。
+  persistent_workers: true
+  # prefetch_factor: DataLoader 每个 worker 预取的批次数；仅在 num_workers>0 时生效。
+  prefetch_factor: 4
+  # val_batch_size/test_batch_size: 验证与测试阶段的 batch 大小（不填则与训练相同）。
+  val_batch_size: null
+  test_batch_size: null
+
+# 编码器模块：将原始信号与 move/base 等辅助特征映射到统一的时间轴表征。
+encoder:
+  # name: 使用双分支 CNN 编码器（参见 src/ngpathfinder/modules/encoder/dual_branch.py）。
+  name: dual_branch
+  params:
+    # signal_dim: 原始信号通道数；应与数据集 stride 对齐，这里为 6。
+    signal_dim: 6
+    # hidden_dim: 编码器输出隐层维度，下游模块也将保持该宽度。
+    hidden_dim: 512
+    # signal_kernel_size/context_kernel_size: 控制两条卷积分支的感受野。
+    signal_kernel_size: 5
+    context_kernel_size: 5
+    use_identity_residual: true
+
+# 融合模块：以 DETR 风格查询将同位点的多个读段合并成统一时间轴。
+fusion:
+  name: query
+  params:
+    hidden_dim: 512
+    num_heads: 8
+    num_queries: 800
+    max_learned_queries: 800
+    dynamic_query_cap: 800
+    fourier_frequencies: 16
+    use_learned_residual: true
+    hint_strength: 0.5        # 打开 encoder soft_hint 的权重
+    use_gating: false          # 恢复门控抑制无关查询
+    gate_threshold: 0.0
+    relative_bias: gaussian   # 让查询位置与时间步形成高斯对齐
+    gaussian_sigma_init: [0.0001, 0.001, 0.002, 0.004, 0.006, 0.008, 0.0010, 0.032]
+    store_attention: false
+    use_kv_positional_encoding: true
+    num_query_self_layers: 2
+    use_identity_cross_attention: true
+
+
+# 聚合模块：基于 Set Transformer 进一步融合多读段信息，并估计不确定性。
+aggregator:
+  # name: 选用 set_transformer 聚合器（src/ngpathfinder/modules/aggregator/set_transformer.py）。
+  name: set_transformer
+  params:
+    # hidden_dim/num_heads/num_layers: 控制 Set Transformer 的宽度、头数和层数。
+    hidden_dim: 512
+    num_heads: 8
+    num_layers: 2
+    # ffn_multiplier: 前馈层宽度倍数，默认为 4 表示 4×hidden_dim。
+    ffn_multiplier: 4.0
+    # dropout: 模型内部 dropout 概率。
+    dropout: 0.1
+    # num_seeds: Set Transformer 中种子向量数量；1 表示聚合成单条时间轨迹。
+    num_seeds: 4
+    # flag_dim: 读段标识向量维度，用于显式编码样本级特征。
+    flag_dim: 8
+    # include_uncertainty: 若为 true，则输出熵与方差等不确定性侧信息，供解码器 FiLM 调制。
+    include_uncertainty: true
+    # residual_scale_init/bias_strength/gaussian_sigma_init: 控制 soft hint 生成时的初始缩放与分布参数。
+    residual_scale_init: 0.4
+    bias_strength: 1.0
+    gaussian_sigma_init: [0.06, 0.12, 0.24]
+
+decoder:
+  name: ctc
+  params:
+    model_dim: 512
+    num_layers: 4
+    num_heads: 16
+    dropout: 0.1
+    ffn_multiplier: 4.0
+    use_temporal_positional_encoding: true
+
+losses:
+  ctc_fast:
+    name: ctc_fast
+    params:
+      blank: 0
+      reduction: mean
+      zero_infinity: true
+
+# 优化器设置：默认使用 Adam，可根据实际需求调整学习率/权重衰减等超参。
+optimizer:
+  name: adam
+  params:
+    lr: 0.00001
+    betas: [0.9, 0.98]
+    eps: 1.0e-9
+    weight_decay: 1.0e-9
+
+
+scheduler:
+  # 未显式指定 T_max 时，训练脚本会基于 (max_epochs × 步数) 自动推导退火周期。
+  name: cosineannealinglr
+  params:
+    eta_min: 1.0e-8
+
+# 训练器占位参数：由 scripts/train.py 的简单循环读取，可在自定义 Trainer 中复用。
+trainer:
+  # max_epochs: 训练轮数；示例设为 1 仅用于验证流程是否跑通。
+  max_epochs: 25
+  # precision: 计算精度；float32 最稳妥。
+  precision: bfloat16
+  # gradient_clip_val: 全局梯度裁剪阈值，抑制梯度爆炸。
+  gradient_clip_val: 1.0
+  # log_interval: 每隔多少个迭代打印一次日志。
+  log_interval: 50
+
+# output_dir: 训练中间结果与日志的输出目录（日志、TensorBoard 等）。
+output_dir: outputs2/2_base_wide512+identity-res
+
+# checkpoint_dir: 模型权重的保存目录（相对路径会拼接到 output_dir 下）。
+checkpoint_dir: checkpoints
+
+inference:
+  decode_strategy: torchaudio
+  beam_width: 100
+  beam_prune_threshold: 50
+  torchaudio:
+    nbest: 3
+    beam_threshold: 50
+    blank_token: "-"
+    sil_token: "-"
